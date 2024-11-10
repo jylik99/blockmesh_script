@@ -8,6 +8,102 @@ PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+install_node() {
+    local USER_EMAIL="$1"
+    local USER_PASSWORD="$2"
+    
+    LATEST_RELEASE_URL=$(wget -qO- https://api.github.com/repos/block-mesh/block-mesh-monorepo/releases/latest | grep "browser_download_url.*blockmesh-cli-x86_64-unknown-linux-gnu.tar.gz" | cut -d '"' -f 4)
+    LATEST_VERSION=$(wget -qO- https://api.github.com/repos/block-mesh/block-mesh-monorepo/releases/latest | grep '"tag_name":' | cut -d '"' -f 4)
+
+    echo -e "${YELLOW}Latest version: $LATEST_VERSION${NC}"
+
+    cd /tmp
+    wget $LATEST_RELEASE_URL
+    tar -xzvf blockmesh-cli-x86_64-unknown-linux-gnu.tar.gz
+    sudo mv target/x86_64-unknown-linux-gnu/release/blockmesh-cli /usr/local/bin/
+    sudo chmod +x /usr/local/bin/blockmesh-cli
+    rm -rf target blockmesh-cli-x86_64-unknown-linux-gnu.tar.gz
+
+    echo "$LATEST_VERSION" | sudo tee /usr/local/bin/blockmesh-version >/dev/null
+
+    sudo bash -c "cat > /etc/systemd/system/blockmesh.service << EOL
+[Unit]
+Description=BlockMesh CLI Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/blockmesh-cli login --email $USER_EMAIL --password $USER_PASSWORD
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOL"
+
+    cat > $HOME/update-blockmesh.sh << 'EOL'
+#!/bin/bash
+
+while true; do
+    LATEST_VERSION=$(wget -qO- https://api.github.com/repos/block-mesh/block-mesh-monorepo/releases/latest | grep '"tag_name":' | cut -d '"' -f 4)
+    CURRENT_VERSION=$(cat /usr/local/bin/blockmesh-version 2>/dev/null)
+    echo "Checking for updates... Current version: $CURRENT_VERSION, Latest version: $LATEST_VERSION"
+    
+    if [ "$LATEST_VERSION" != "$CURRENT_VERSION" ]; then
+        echo "Updating to version $LATEST_VERSION..."
+        LATEST_URL=$(wget -qO- https://api.github.com/repos/block-mesh/block-mesh-monorepo/releases/latest | grep "browser_download_url.*blockmesh-cli-x86_64-unknown-linux-gnu.tar.gz" | cut -d '"' -f 4)
+        
+        sudo systemctl stop blockmesh
+        
+        cd /tmp
+        wget -q $LATEST_URL
+        tar -xzf blockmesh-cli-x86_64-unknown-linux-gnu.tar.gz
+        sudo mv target/x86_64-unknown-linux-gnu/release/blockmesh-cli /usr/local/bin/
+        sudo chmod +x /usr/local/bin/blockmesh-cli
+        echo "$LATEST_VERSION" | sudo tee /usr/local/bin/blockmesh-version >/dev/null
+        rm -rf target blockmesh-cli-x86_64-unknown-linux-gnu.tar.gz
+        
+        sudo systemctl start blockmesh
+        echo "Update completed!"
+    else
+        echo "No update needed, running latest version"
+    fi
+    
+    sleep 10800
+done
+EOL
+
+    chmod +x $HOME/update-blockmesh.sh
+
+    sudo bash -c "cat > /etc/systemd/system/blockmesh-updater.service << EOL
+[Unit]
+Description=BlockMesh Auto Updater
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=$HOME/update-blockmesh.sh
+WorkingDirectory=/tmp
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOL"
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable blockmesh blockmesh-updater
+    sudo systemctl start blockmesh blockmesh-updater
+
+    echo -e "${GREEN}Node installed with auto-updates enabled!${NC}"
+    echo -e "${YELLOW}Showing node logs:${NC}"
+    sudo journalctl -u blockmesh -u blockmesh-updater -f
+}
+
 echo -e "${YELLOW}Choose an action:${NC}"
 echo -e "${CYAN}1) Install node${NC}"
 echo -e "${CYAN}2) Uninstall node${NC}"
@@ -20,7 +116,6 @@ case $choice in
             sudo apt update
             sudo apt install bc -y
         fi
-        sleep 1
 
         UBUNTU_VERSION=$(lsb_release -rs)
         REQUIRED_VERSION=22.04
@@ -33,25 +128,10 @@ case $choice in
         if ! command -v tar &> /dev/null; then
             sudo apt install tar -y
         fi
-        sleep 1
 
         if ! command -v wget &> /dev/null; then
             sudo apt install wget -y
         fi
-        sleep 1
-
-        LATEST_RELEASE_URL=$(wget -qO- https://api.github.com/repos/block-mesh/block-mesh-monorepo/releases/latest | grep "browser_download_url.*blockmesh-cli-x86_64-unknown-linux-gnu.tar.gz" | cut -d '"' -f 4)
-        LATEST_VERSION=$(wget -qO- https://api.github.com/repos/block-mesh/block-mesh-monorepo/releases/latest | grep '"tag_name":' | cut -d '"' -f 4)
-
-        echo -e "${YELLOW}Latest version: $LATEST_VERSION${NC}"
-
-        wget $LATEST_RELEASE_URL
-        tar -xzvf blockmesh-cli-x86_64-unknown-linux-gnu.tar.gz
-        sleep 1
-
-        rm blockmesh-cli-x86_64-unknown-linux-gnu.tar.gz
-
-        cd target/release
 
         echo -e "${YELLOW}Enter your email:${NC}"
         read USER_EMAIL
@@ -59,54 +139,22 @@ case $choice in
         echo -e "${YELLOW}Enter your password:${NC}"
         read -s USER_PASSWORD
 
-        USERNAME=$(whoami)
-
-        if [ "$USERNAME" == "root" ]; then
-            HOME_DIR="/root"
-        else
-            HOME_DIR="/home/$USERNAME"
-        fi
-
-        sudo bash -c "cat <<EOT > /etc/systemd/system/blockmesh.service
-
-[Unit]
-Description=BlockMesh CLI Service
-After=network.target
-
-[Service]
-User=$USERNAME
-ExecStart=$HOME_DIR/target/release/blockmesh-cli login --email $USER_EMAIL --password $USER_PASSWORD
-WorkingDirectory=$HOME_DIR/target/release
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-EOT"
-
-        sudo systemctl daemon-reload
-        sleep 1
-        sudo systemctl enable blockmesh
-        sudo systemctl start blockmesh
-
-        echo -e "${GREEN}Node installed! Enable logging...${NC}"
-
-        echo -e "${YELLOW}logs:${NC}"
-        sudo journalctl -u blockmesh -f
+        install_node "$USER_EMAIL" "$USER_PASSWORD"
         ;;
     2)
         echo -e "${BLUE}Uninstalling BlockMesh node...${NC}"
-
-        sudo systemctl stop blockmesh
-        sudo systemctl disable blockmesh
+        
+        sudo systemctl stop blockmesh blockmesh-updater
+        sudo systemctl disable blockmesh blockmesh-updater
         sudo rm /etc/systemd/system/blockmesh.service
+        sudo rm /etc/systemd/system/blockmesh-updater.service
         sudo systemctl daemon-reload
-        sleep 1
-
-        rm -rf target
+        
+        sudo rm -f /usr/local/bin/blockmesh-cli
+        sudo rm -f /usr/local/bin/blockmesh-version
+        rm -f $HOME/update-blockmesh.sh
 
         echo -e "${GREEN}BlockMesh node successfully uninstalled!${NC}"
-
-        sleep 1
         ;;
     *)
         echo -e "${RED}Invalid option. Exiting...${NC}"
